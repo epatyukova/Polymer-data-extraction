@@ -164,6 +164,9 @@ def filter_papers(
     html_files = sorted(folder.glob("*.html"))
     if not html_files:
         print(f"No HTML files found in {folder}", file=sys.stderr)
+        if output_file:
+            Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_file).write_text("", encoding="utf-8")
         return []
 
     passing = []
