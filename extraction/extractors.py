@@ -111,6 +111,12 @@ class Property(BaseModel):
             "Figure/table references, citations, uncertainty notes. Use null if none."
         )
     )
+    value_error: Optional[float] = Field(
+        default=None,
+        description=(
+            "Measurement uncertainty (e.g. ±2 in '105 ± 2 °C'). Use null if not reported."
+        )
+    )
 
 
 class CompositionProperties(BaseModel):
@@ -221,6 +227,37 @@ def _create_extractor(model: str = "gpt-5.2"):
     )
 
 
+def _extract_with_direct_json(prompt: str, model: str) -> dict:
+    """
+    Fallback: use LLM directly (no tools), ask for JSON, parse response.
+    Used when TrustCall fails (e.g. JsonPointerException from tool-call format mismatch).
+    """
+    import json
+    import re
+
+    suffix = "\n\nRespond with valid JSON only. Use the format: {\"compositions\": [...]}. No other text."
+    try:
+        llm = get_extraction_llm(model)
+        response = llm.invoke(prompt + suffix)
+        content = response.content if hasattr(response, "content") else str(response)
+    except Exception:
+        return {"compositions": []}
+
+    if not content or not content.strip():
+        return {"compositions": []}
+
+    content = re.sub(r"<think>[\s\S]*?</think>", "", content, flags=re.IGNORECASE)
+    match = re.search(r"\{[\s\S]*\}", content)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            comps = data.get("compositions", [])
+            return {"compositions": comps}
+        except json.JSONDecodeError:
+            pass
+    return {"compositions": []}
+
+
 def extract_with_trustcall(prompt: str, model: str = "gpt-5.2") -> dict:
     """
     Run extraction. For ollama: models without tool support (e.g. deepseek-r1),
@@ -244,6 +281,15 @@ def extract_with_trustcall(prompt: str, model: str = "gpt-5.2") -> dict:
         return dict(response)
     except Exception as e:
         err = str(e).lower()
+        # TrustCall/JSON patch error (e.g. JsonPointerException: "arguments" not found)
+        try:
+            from jsonpointer import JsonPointerException
+            if isinstance(e, JsonPointerException):
+                return _extract_with_direct_json(prompt, model)
+        except ImportError:
+            pass
+        if "jsonpointer" in err or "arguments" in err or "member" in err:
+            return _extract_with_direct_json(prompt, model)
         if "does not support tools" in err or "tool" in err:
             if model_lower.startswith("ollama:"):
                 return _extract_with_ollama_json(prompt, model)
