@@ -34,6 +34,12 @@ ollama pull deepseek-r1:8b
 # Run all filters (term + ontology + embedding, intersection)
 python run_all_filters.py corpus/2019 -o corpus/2019/papers_all_filters_passing --copy
 
+# Filter only papers that contain (polymer, property, value) triples for specific properties
+python run_all_filters.py corpus/2019 -o corpus/2019/papers_all_filters_passing --copy --properties "glass transition" Tg Mw Mn
+
+# Filter by property terms (polymer, property, value triples; uses polymer_synonyms.json)
+python -m filters.filter_by_property_terms corpus/2019/papers -o passing.txt --properties "glass transition" Tg Mw Mn
+
 # Individual filters (run as modules)
 python -m filters.filter_polymer_papers corpus/2019/papers -o passing.txt
 python -m filters.filter_by_ontology corpus/2019/papers_passing -o onto_passing.txt
@@ -74,7 +80,10 @@ python extract_polymer_properties.py papers_folder -o out.json --resume
 │   ├── filter_polymer_papers.py # Term-based
 │   ├── filter_by_ontology.py    # Ontology triples
 │   └── filter_by_embedding.py   # SPECTER similarity
-├── extraction/                  # TrustCall schemas, prompts
+├── extraction/                  # Schemas, prompts, ontologies
+│   ├── property_ontology.json   # Property name/symbol mappings (Tg, Mw, etc.)
+│   ├── polymer_abbreviations.json  # Polymer abbreviation → full name (Distrupol, PolySource)
+│   └── polymer_synonyms.json   # Property synonyms for filter_by_property_terms (glass transition, Tg, etc.)
 ├── parsers/                     # RSC HTML parser
 ├── corpus/                      # Papers
 ├── purple_book/                 # IUPAC Purple Book terms
@@ -89,9 +98,23 @@ Each paper yields: `compositions` (polymer names), `processing_conditions`, `cha
 - `measurement_condition`, `additional_information`
 - `confidence` (0–1): per-property heuristic score for downstream filtering
 - `property_name_original` (when aligned): original name before ontology mapping
+- `value_error`: measurement uncertainty (e.g. ±2) when reported
+- `value_numeric_si`, `unit_si`: SI-unit conversion (K, kg/mol, Pa, m)
+- `composition_standard`: full chemical name when composition is exactly a known abbreviation (e.g. PMMA → polymethyl methacrylate)
+- `composition_abbreviations_resolved`: `{abbr: full_name}` for abbreviations detected in composition text
 - `validation_warning`, `unit_warning` (when validation issues): optional post-processing flags
 
-Post-processing includes: property ontology alignment (Purple Book mapping), validation of `value_numeric` and units (pint), and confidence scores.
+Post-processing includes: property ontology alignment (Purple Book mapping), composition abbreviation resolution (Distrupol, PolySource), validation of `value_numeric` and units (pint), SI conversion, uncertainty extraction, and confidence scores.
+
+### ChemDataExtractor2 integration (optional)
+
+Install `chemdataextractor2` and `tabledataextractor` for:
+
+- **CDE2 rule-based extraction** (runs automatically when installed): Tg, Tm pre-extraction, merged into LLM results
+- **CDE2 table extraction** (default when installed): Uses TableDataExtractor for table parsing
+- **`--no-cde2`**: Disable all CDE2 when the model (hf_bert_crf_tagger) cannot be downloaded. Falls back to RSC parser.
+
+Pipeline: CDE2 rule-based (Tg, Tm) → LLM extraction → merge CDE2 → LLM alignment (term translation) → validation, SI, confidence.
 
 ## License
 

@@ -26,6 +26,22 @@ from dotenv import load_dotenv
 
 from config import DEFAULT_EXTRACTION_OUTPUT, DEFAULT_PAPERS_FOLDER, PROJECT_ROOT
 from extraction.extractors import extract_with_trustcall
+try:
+    from extraction.cde2_integration import (
+        extract_tables_cde2,
+        extract_properties_rulebased,
+        merge_uncertainty_and_rulebased,
+        is_available as cde2_available,
+    )
+except (ImportError, Exception):
+    def cde2_available():
+        return False
+    def extract_tables_cde2(_):
+        return []
+    def extract_properties_rulebased(_):
+        return []
+    def merge_uncertainty_and_rulebased(llm_props, _cde2_props, _comp):
+        return llm_props
 from extraction.post_processing import post_process_compositions
 from extraction.prompt_generator import generate_system_prompt, generate_user_prompt
 from parsers.rsc_html_parser import RSCSectionParser
@@ -79,11 +95,17 @@ def get_paper_text(
     parser_result: dict,
     include_tables: bool = True,
     table_aware: bool = True,
+    html_path: Path | None = None,
+    use_cde2_tables: bool = True,
 ) -> str:
     """Extract full paper text for LLM: all sections and tables (markdown when table_aware)."""
     meta = parser_result.get("meta", {})
     sections = parser_result.get("sections", {})
     tables = parser_result.get("tables", [])
+    if use_cde2_tables and html_path and cde2_available():
+        cde2_tables = extract_tables_cde2(html_path)
+        if cde2_tables:
+            tables = [{"caption": t.get("caption", ""), "content": t.get("content", "")} for t in cde2_tables]
     title = meta.get("title", "")
     parts = [f"Title: {title}"]
     for section_name, section_text in sections.items():
@@ -187,6 +209,8 @@ def process_paper(
     subfield_model: str,
     skip_subfield: bool,
     property_filter: list[str] | None = None,
+    use_cde2_tables: bool = True,
+    use_cde2_rulebased: bool = True,
 ) -> dict | None:
     """
     Process one paper. Returns extraction dict or None if skipped (non-experimental).
@@ -211,11 +235,33 @@ def process_paper(
         if subfield not in ("experimental", "hybrid"):
             return None
 
-    text = get_paper_text(result)
+    # 1. CDE2 rule-based extraction first (when available and enabled)
+    cde2_props = []
+    if use_cde2_rulebased and cde2_available():
+        cde2_props = extract_properties_rulebased(path)
+
+    # 2. LLM extraction
+    text = get_paper_text(result, html_path=path, use_cde2_tables=use_cde2_tables)
     data = extract_with_trustcall_wrapper(
         text, subfield=subfield, model=extraction_model, property_filter=property_filter
     )
-    data = post_process_compositions(data, align_ontology=True, validate=True, add_confidence=True)
+
+    # 3. Merge CDE2 into LLM results (uncertainties, CDE2-only properties)
+    if cde2_props:
+        for comp in data.get("compositions", []):
+            comp_name = comp.get("composition", "")
+            props = comp.get("properties_of_composition", [])
+            comp["properties_of_composition"] = merge_uncertainty_and_rulebased(
+                props, cde2_props, comp_name
+            )
+
+    # 4. Post-process: always LLM alignment (term translation), validation, SI, confidence
+    data = post_process_compositions(
+        data, align_ontology=True, validate=True, add_confidence=True,
+        add_si=True, add_uncertainty=True,
+        use_llm_alignment=True,
+        alignment_model=extraction_model,
+    )
 
     elapsed = time.perf_counter() - t0
     data["doi"] = doi
@@ -280,6 +326,11 @@ def main():
         help="Resume from last run: load existing output, skip already-processed papers, append new results",
     )
     parser.add_argument(
+        "--no-cde2",
+        action="store_true",
+        help="Disable all CDE2 (tables + rule-based). Use when CDE2 model (hf_bert_crf_tagger) cannot be downloaded. Falls back to RSC parser.",
+    )
+    parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Quiet mode",
@@ -341,6 +392,8 @@ def main():
             subfield_model=args.subfield_model,
             skip_subfield=args.skip_subfield,
             property_filter=property_filter,
+            use_cde2_tables=not args.no_cde2,
+            use_cde2_rulebased=not args.no_cde2,
         )
         if data is None:
             skipped += 1

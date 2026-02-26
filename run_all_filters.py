@@ -52,6 +52,18 @@ def main():
         help="Copy passing papers to output dir",
     )
     parser.add_argument(
+        "--properties",
+        nargs="+",
+        default=None,
+        help="Filter by property terms (polymer, property, value triples). Uses polymer_synonyms.json. E.g. --properties 'glass transition' Tg Mw Mn",
+    )
+    parser.add_argument(
+        "--properties-file",
+        type=Path,
+        default=None,
+        help="File with property names (one per line). Overrides --properties.",
+    )
+    parser.add_argument(
         "--skip-embedding",
         action="store_true",
         help="Skip embedding filter (faster)",
@@ -74,8 +86,19 @@ def main():
         print(f"Folder not found: {folder}", file=sys.stderr)
         sys.exit(1)
 
-    out_dir = args.output_dir or (folder.parent / "papers_all_filters_passing")
     verbose = not args.quiet
+
+    # Auto-detect: if folder has no HTML but has papers/ or papers_passing/ subdir, use that
+    if not list(folder.glob("*.html")):
+        for sub in ("papers", "papers_passing", "papers_onto_passing"):
+            candidate = folder / sub
+            if candidate.exists() and list(candidate.glob("*.html")):
+                if verbose:
+                    print(f"No HTML in {folder}; using {candidate}\n", file=sys.stderr)
+                folder = candidate
+                break
+
+    out_dir = args.output_dir or (folder.parent / "papers_all_filters_passing")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -95,6 +118,22 @@ def main():
         if verbose:
             print(f"  {len(onto_set)} passed\n", file=sys.stderr)
 
+        property_set = None
+        if args.properties or (args.properties_file and args.properties_file.exists()):
+            if verbose:
+                print("Running property-terms filter...", file=sys.stderr)
+            t_prop = tmp / "property.txt"
+            extra = []
+            if args.properties:
+                extra = ["--properties"] + args.properties
+            elif args.properties_file:
+                extra = ["--properties-file", str(args.properties_file)]
+            cmd = [sys.executable, "-m", "filters.filter_by_property_terms", str(folder), "-o", str(t_prop), "-q"] + extra
+            subprocess.run(cmd, check=True, capture_output=True, cwd=PROJECT_ROOT)
+            property_set = {line.strip() for line in t_prop.read_text().splitlines() if line.strip()}
+            if verbose:
+                print(f"  {len(property_set)} passed\n", file=sys.stderr)
+
         if args.skip_embedding:
             emb_set = term_set  # no extra filter
             if verbose:
@@ -111,6 +150,8 @@ def main():
                 print(f"  {len(emb_set)} passed\n", file=sys.stderr)
 
     all_pass = term_set & onto_set & emb_set
+    if property_set is not None:
+        all_pass = all_pass & property_set
     if verbose:
         print(f"Intersection: {len(all_pass)} papers pass all filters", file=sys.stderr)
 
