@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -211,6 +212,7 @@ def process_paper(
     property_filter: list[str] | None = None,
     use_cde2_tables: bool = True,
     use_cde2_rulebased: bool = True,
+    timeout_seconds: int | None = None,
 ) -> dict | None:
     """
     Process one paper. Returns extraction dict or None if skipped (non-experimental).
@@ -235,6 +237,58 @@ def process_paper(
         if subfield not in ("experimental", "hybrid"):
             return None
 
+    def _do_extract():
+        return _process_paper_inner(
+            path, result, meta, sections, doi, title, subfield,
+            extraction_model, use_cde2_tables, use_cde2_rulebased, property_filter,
+        )
+
+    if timeout_seconds and timeout_seconds > 0:
+        try:
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(_do_extract)
+                data = future.result(timeout=timeout_seconds)
+        except FuturesTimeoutError:
+            elapsed = time.perf_counter() - t0
+            return {
+                "doi": doi,
+                "title": title,
+                "source_file": path.name,
+                "subfield": subfield,
+                "error": f"timeout after {timeout_seconds}s (paper may lack requested properties or be very long)",
+                "compositions": [],
+                "skipped": False,
+                "time_spent_seconds": round(elapsed, 2),
+            }
+    else:
+        data = _do_extract()
+
+    if data is None:
+        return None
+    elapsed = time.perf_counter() - t0
+    data["doi"] = doi
+    data["title"] = title
+    data["source_file"] = path.name
+    data["subfield"] = subfield
+    data["time_spent_seconds"] = round(elapsed, 2)
+    return data
+
+
+def _process_paper_inner(
+    path: Path,
+    result: dict,
+    meta: dict,
+    sections: dict,
+    doi: str,
+    title: str,
+    subfield: str,
+    extraction_model: str,
+    use_cde2_tables: bool,
+    use_cde2_rulebased: bool,
+    property_filter: list[str] | None,
+) -> dict | None:
+    """Inner extraction logic (no timeout)."""
+    t0 = time.perf_counter()
     # 1. CDE2 rule-based extraction first (when available and enabled)
     cde2_props = []
     if use_cde2_rulebased and cde2_available():
@@ -331,6 +385,13 @@ def main():
         help="Disable all CDE2 (tables + rule-based). Use when CDE2 model (hf_bert_crf_tagger) cannot be downloaded. Falls back to RSC parser.",
     )
     parser.add_argument(
+        "--timeout-per-paper",
+        type=int,
+        default=600,
+        metavar="SECONDS",
+        help="Skip paper after this many seconds (default: 600). Use 0 to disable. Helps avoid stalls when a paper lacks requested properties.",
+    )
+    parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Quiet mode",
@@ -364,6 +425,7 @@ def main():
         html_files = html_files[: args.limit]
 
     results = []
+    existing: list[dict] = []
     verbose = not args.quiet
     already_processed: set[str] = set()
     if args.resume and args.output.exists():
@@ -374,13 +436,21 @@ def main():
                     sf = item.get("source_file")
                     if sf:
                         already_processed.add(sf)
+            else:
+                existing = []
             if already_processed and verbose:
                 print(f"Resuming: skipping {len(already_processed)} already-processed papers", file=sys.stderr)
         except (json.JSONDecodeError, OSError):
-            pass
+            existing = []
 
     html_files = [p for p in html_files if p.name not in already_processed]
     skipped = 0
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+
+    def _save_results():
+        """Write current results to file (existing + new)."""
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(existing + results, f, indent=2, ensure_ascii=False)
 
     for i, path in enumerate(html_files):
         if verbose:
@@ -394,31 +464,23 @@ def main():
             property_filter=property_filter,
             use_cde2_tables=not args.no_cde2,
             use_cde2_rulebased=not args.no_cde2,
+            timeout_seconds=args.timeout_per_paper or None,
         )
         if data is None:
             skipped += 1
             continue
         results.append(data)
+        _save_results()  # Dump after each paper so progress is never lost
 
-    if args.resume and args.output.exists() and already_processed:
-        try:
-            existing = json.loads(args.output.read_text(encoding="utf-8"))
-            if isinstance(existing, list):
-                results = existing + results
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
-
+    all_results = existing + results
     total_compositions = sum(len(r.get("compositions", [])) for r in results)
     total_seconds = sum(r.get("time_spent_seconds", 0) for r in results)
     if verbose:
-        print(f"\nExtracted {total_compositions} compositions from {len(results)} papers", file=sys.stderr)
+        print(f"\nExtracted {total_compositions} compositions from {len(results)} papers this run", file=sys.stderr)
+        print(f"Total in output: {len(all_results)} papers", file=sys.stderr)
         if not args.skip_subfield:
             print(f"Skipped {skipped} non-experimental papers", file=sys.stderr)
-        print(f"Total time: {total_seconds:.1f} s ({total_seconds / 60:.1f} min)", file=sys.stderr)
+        print(f"Time this run: {total_seconds:.1f} s ({total_seconds / 60:.1f} min)", file=sys.stderr)
         print(f"Wrote {args.output}", file=sys.stderr)
 
 

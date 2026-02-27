@@ -68,6 +68,9 @@ python extract_polymer_properties.py papers_folder -o out.json --limit 5
 
 # Resume interrupted extraction (skips already-processed papers)
 python extract_polymer_properties.py papers_folder -o out.json --resume
+
+# Timeout per paper (default 600s) - skip papers that stall (e.g. lack requested properties)
+python extract_polymer_properties.py papers_folder -o out.json --timeout-per-paper 300
 ```
 
 ## Project layout
