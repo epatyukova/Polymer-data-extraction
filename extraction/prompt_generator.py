@@ -21,7 +21,9 @@ def generate_system_prompt(
         props = ", ".join(property_filter)
         property_filter_line = (
             f"ONLY EXTRACT THESE PROPERTIES: {props}\n"
-            "Ignore any other properties. If a property is not in this list, do not include it.\n\n"
+            "Ignore any other properties. If a property is not in this list, do not include it.\n"
+            "If a property is NOT reported in the paper, omit it entirely. Do not invent or guess values.\n"
+            "Empty properties_of_composition is acceptable when none of the requested properties appear.\n\n"
         )
 
     return (
