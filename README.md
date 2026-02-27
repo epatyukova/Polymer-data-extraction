@@ -1,6 +1,6 @@
 # Polymer Paper Selection & Property Extraction
 
-Extract polymer-related data from RSC (Royal Society of Chemistry) HTML papers. Pipeline: filter papers by term + ontology + embedding, then extract structured polymer properties (KnowMat-style schema) using OpenAI or Anthropic.
+Extract polymer-related data from RSC (Royal Society of Chemistry) HTML papers. Pipeline: filter papers by term + ontology + embedding, then extract structured polymer properties (KnowMat-style schema) using OpenAI or Anthropic. This pipeline uses ideas/implementations from KnowMat2, but aims at reducing processing time and cost per paper. For the balance between quality of extraction/cost it is recommended to use gpt-5-mini. Then the cost per paper is 2-3p, if only Tg, Tm, Mn, Mw is extracted, time 100-200s. And about 3-4p for all properties extraction.
 
 ## Overview
 
